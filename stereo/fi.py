@@ -14,10 +14,18 @@ def preprocess(img1, img2):
     if (img2.ndim == 3):
         img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
-    # 直方图均衡
+    # 直方图均衡 减轻光照不均的影响
     img1 = cv2.equalizeHist(img1)
     img2 = cv2.equalizeHist(img2)
 
+    # 高斯滤波 在图片质量不好时使用
+    # kernel_size = (3, 3)  # 内核大小
+    # img1 = cv2.GaussianBlur(img1, kernel_size,0)
+    # img2 = cv2.GaussianBlur(img2, kernel_size,0)
+
+    # 中值滤波 消除孤立的噪点
+    img1 = cv2.medianBlur(img1, 3)
+    img2 = cv2.medianBlur(img2, 3)
     return img1, img2
 
 
@@ -109,7 +117,7 @@ def stereoMatchSGBM(left_image, right_image, down_scale=False):
         disparity_left = left_matcher.compute(left_image, right_image)
         disparity_right = right_matcher.compute(right_image, left_image)
  
-    else:
+    else:# 降采样并插值处理图像，提高计算效率，并使图像更加平滑，减少图像噪声
         left_image_down = cv2.pyrDown(left_image)
         right_image_down = cv2.pyrDown(right_image)
         factor = left_image.shape[1] / left_image_down.shape[1]
@@ -146,6 +154,52 @@ def getDepthMapWithConfig(disparityMap: np.ndarray, config: stereoconfig.stereoC
     depthMap[reset_index2] = 0
     return depthMap.astype(np.float32)
 
+def WLS_SGBM(left_image, right_image):#利用WLS滤波器改善视差图质量，一般只在视差图质量不好时使用
+    if left_image.ndim == 2:
+        img_channels = 1
+    else:
+        img_channels = 3
+    blockSize = 5
+    size = (left_image.shape[1], left_image.shape[0])
+    paraml = {'minDisparity': 0,
+             'numDisparities': 320,#SGBM认为图像左侧前numDisparities列是不能估计视差的，所以会看到视差图左侧有一块是黑色
+             'blockSize': blockSize,
+             'P1': 64 * img_channels * blockSize ** 2,
+             'P2': 256 * img_channels * blockSize ** 2,
+             'disp12MaxDiff': 1,
+             'preFilterCap': 63,
+             'uniquenessRatio': 15,
+             'speckleWindowSize': 100,
+             'speckleRange': 1,
+             'mode': cv2.STEREO_SGBM_MODE_SGBM_3WAY
+             }
+    left_matcher = cv2.StereoSGBM_create(**paraml)
+    right_matcher = cv2.ximgproc.createRightMatcher(left_matcher)
+    # WLS滤波器参数
+    lmbda = 80000
+    sigma = 1.3
+    wls_filter = cv2.ximgproc.createDisparityWLSFilter(matcher_left=left_matcher)
+    wls_filter.setLambda(lmbda)
+    wls_filter.setSigmaColor(sigma)
+
+    left_image_down = cv2.pyrDown(left_image)
+    right_image_down = cv2.pyrDown(right_image)
+    factor = left_image.shape[1] / left_image_down.shape[1]
+    disparity_left_half = left_matcher.compute(left_image_down, right_image_down)
+    disparity_right_half = right_matcher.compute(right_image_down, left_image_down)
+    disparity_left = cv2.resize(disparity_left_half, size, interpolation=cv2.INTER_AREA)
+    disparity_right = cv2.resize(disparity_right_half, size, interpolation=cv2.INTER_AREA)
+    displ = factor * disparity_left
+    dispr = factor * disparity_right
+
+    displ = displ.astype(np.float32) / 16.
+    dispr = dispr.astype(np.float32) / 16.
+    displ = np.int16(displ)
+    dispr = np.int16(dispr)
+    filteredImg = wls_filter.filter(displ, left_image, None, dispr)
+    filteredImg = cv2.normalize(src=filteredImg, dst=filteredImg, beta=0, alpha=255, norm_type=cv2.NORM_MINMAX)
+    filteredImg = np.uint8(filteredImg)
+    return filteredImg
 
 if __name__ == '__main__':
 
@@ -153,13 +207,13 @@ if __name__ == '__main__':
     # print(sys.argv[1])
     # print(sys.argv[2])
 
-
-    # 读取MiddleBurry数据集的图片
+    # 与相机前端联动时，使用下面的代码
     iml = cv2.imread(sys.argv[1], 1)  # 左图
-
     imr = cv2.imread(sys.argv[2], 1)  # 右图
-    # iml = cv2.imread("right5.bmp", 1)  # 左图
-    # imr = cv2.imread("left5.bmp", 1)  # 右图
+
+    # 直接读取图片时，使用下面的代码
+    # iml = cv2.imread("right1.bmp", 1)  # 左图
+    # imr = cv2.imread("left1.bmp", 1)  # 右图
     if (iml is None) or (imr is None):
         print("Error: Images are empty, please check your image's path!")
         sys.exit(0)
@@ -168,7 +222,6 @@ if __name__ == '__main__':
     # 读取相机内参和外参
     # 使用之前先将标定得到的内外参数填写到stereoconfig.py中的StereoCamera类中
     config = stereoconfig.stereoCamera()
-    #config.setMiddleBurryParams()
     print(config.cam_matrix_left)
 
     # 立体校正
@@ -181,8 +234,9 @@ if __name__ == '__main__':
     cv2.imwrite('check_rectification.png', line)
 
     # 立体匹配
-    iml_, imr_ = preprocess(iml_rectified, imr_rectified)  # 预处理，一般可以削弱光照不均的影响，不做也可以
-    disp,_ = stereoMatchSGBM(iml_, imr_, True)  # 这里传入的是未经立体校正的图像，因为我们使用的middleburry图片已经是校正过的了
+    iml_, imr_ = preprocess(iml_rectified, imr_rectified)  # 预处理
+    disp,_ = stereoMatchSGBM(iml_, imr_, True)  
+    # disp = WLS_SGBM(iml_,imr_) 利用WLS滤波器改善视差图质量，一般只在视差图质量不好时使用
     disp1 = cv2.normalize(disp,None,alpha=0,beta=255,norm_type=cv2.NORM_MINMAX,dtype=cv2.CV_8U)
     disp1 = cv2.applyColorMap(disp1*8,2)
     cv2.imwrite('disaprity.png', disp1[0:1080, 512:1920])
@@ -230,21 +284,25 @@ if __name__ == '__main__':
     # 构建点云--Point_XYZRGBA格式
     o3d.io.write_point_cloud("PointCloud.pcd", pointcloud=pointcloud)
     o3d.visualization.draw_geometries([pointcloud])
-    max_depth = 0.6
-    keep_indices = []
-    for i in range(len(pointcloud.points)):
-        if pointcloud.points[i][2] < max_depth:
-            keep_indices.append(i)
 
-    pcd = pointcloud.select_by_index(keep_indices)
+    # 进一步去除干扰背景（可选）
+    # max_depth = 0.6
+    # min_depth = 0.1
+    # keep_indices = []
+    # for i in range(len(pointcloud.points)):
+    #     if pointcloud.points[i][2] < max_depth and pointcloud.points[i][2] > min_depth:
+    #         keep_indices.append(i)
 
-    o3d.visualization.draw_geometries([pcd])
+    # pcd = pointcloud.select_by_index(keep_indices)
+
+    # o3d.visualization.draw_geometries([pcd])
+
     # 平面分割
-    plane_model, inliers = pcd.segment_plane(distance_threshold=0.01,ransac_n=3,num_iterations=1000)
+    plane_model, inliers = pointcloud.segment_plane(distance_threshold=0.01,ransac_n=3,num_iterations=1000)
 
     # 可视化
-    inlier_cloud = pcd.select_by_index(inliers)
-    outlier_cloud = pcd.select_by_index(inliers, invert=True)
+    inlier_cloud = pointcloud.select_by_index(inliers)
+    outlier_cloud = pointcloud.select_by_index(inliers, invert=True)
     inlier_cloud.paint_uniform_color([1.0, 0, 0])
     outlier_cloud.paint_uniform_color([0, 1.0, 0])
     o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])
