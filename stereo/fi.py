@@ -306,3 +306,9 @@ if __name__ == '__main__':
     inlier_cloud.paint_uniform_color([1.0, 0, 0])
     outlier_cloud.paint_uniform_color([0, 1.0, 0])
     o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])
+
+    # 破损率计算
+    total_points = len(pointcloud.points)
+    outlier_points = len(outlier_cloud.points)
+    outlier_ratio = outlier_points / total_points
+    print("破损率为：", outlier_ratio)
