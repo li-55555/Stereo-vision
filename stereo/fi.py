@@ -96,7 +96,7 @@ def stereoMatchSGBM(left_image, right_image, down_scale=False):
              'numDisparities': 320,#SGBM认为图像左侧前numDisparities列是不能估计视差的，所以会看到视差图左侧有一块是黑色
              'blockSize': blockSize,
              'P1': 64 * img_channels * blockSize ** 2,
-             'P2': 256 * img_channels * blockSize ** 2,
+             'P2': 256 * img_channels * blockSize ** 2,# 加大P1、P2，进行弱纹理优化
              'disp12MaxDiff': 1,
              'preFilterCap': 63,
              'uniquenessRatio': 15,
@@ -134,6 +134,32 @@ def stereoMatchSGBM(left_image, right_image, down_scale=False):
     trueDisp_right = disparity_right.astype(np.float32) / 16.
  
     return trueDisp_left, trueDisp_right
+
+# 视差填充
+def disparity_map_hole_filling(disparity_map, max_hole_size=20):
+    filled_disparity_map = np.copy(disparity_map)
+    h, w = disparity_map.shape
+
+    for y in range(h):
+        for x in range(w):
+            if disparity_map[y, x] < 0:
+                # 确认窗口位置
+                min_y = max(0, y - max_hole_size)
+                max_y = min(h, y + max_hole_size + 1)
+                min_x = max(0, x - max_hole_size)
+                max_x = min(w, x + max_hole_size + 1)
+
+                # 生成窗口
+                window = disparity_map[min_y:max_y, min_x:max_x]
+
+                # 找到窗口中非0点
+                valid_disparities = window[window > 0]
+
+                if valid_disparities.size > 0:
+                    # 用窗口中非0点的中值填充
+                    filled_disparity_map[y, x] = np.median(valid_disparities)
+
+    return filled_disparity_map
 
 def getDepthMapWithQ(disparityMap: np.ndarray, Q: np.ndarray) -> np.ndarray:
     points_3d = cv2.reprojectImageTo3D(disparityMap, Q)
@@ -235,7 +261,8 @@ if __name__ == '__main__':
 
     # 立体匹配
     iml_, imr_ = preprocess(iml_rectified, imr_rectified)  # 预处理
-    disp,_ = stereoMatchSGBM(iml_, imr_, True)  
+    disp,_ = stereoMatchSGBM(iml_, imr_, True)
+    # disp = disparity_map_hole_filling(disp, 20)   # 视差空洞填充，有显著效果，但运行时间长
     # disp = WLS_SGBM(iml_,imr_) 利用WLS滤波器改善视差图质量，一般只在视差图质量不好时使用
     disp1 = cv2.normalize(disp,None,alpha=0,beta=255,norm_type=cv2.NORM_MINMAX,dtype=cv2.CV_8U)
     disp1 = cv2.applyColorMap(disp1*8,2)
@@ -306,9 +333,3 @@ if __name__ == '__main__':
     inlier_cloud.paint_uniform_color([1.0, 0, 0])
     outlier_cloud.paint_uniform_color([0, 1.0, 0])
     o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])
-
-    # 破损率计算
-    total_points = len(pointcloud.points)
-    outlier_points = len(outlier_cloud.points)
-    outlier_ratio = outlier_points / total_points
-    print("破损率为：", outlier_ratio)
