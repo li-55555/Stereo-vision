@@ -5,6 +5,10 @@ import stereoconfig
 import open3d as o3d
 import sys
 
+# 连通区域最小面积阈值
+min_area_threshold = 8000
+# 最大视差差异阈值
+max_disparity_difference = 100
 
 # 预处理
 def preprocess(img1, img2):
@@ -37,7 +41,6 @@ def undistortion(image, camera_matrix, dist_coeff):
 
 
 # 获取畸变校正和立体校正的映射变换矩阵、重投影矩阵
-# @param：config是一个类，存储着双目标定的参数:config = stereoconfig.stereoCamera()
 def getRectifyTransform(height, width, config):
     # 读取内参和外参
     left_K = config.cam_matrix_left
@@ -161,6 +164,44 @@ def disparity_map_hole_filling(disparity_map, max_hole_size=20):
 
     return filled_disparity_map
 
+# 剔除小连通区域
+def remove_small_connected_components(disparity_map):
+    h, w = disparity_map.shape
+    labeled_map = np.zeros((h, w), dtype=np.int32)  # 创建一个标签图像，用于存储连通区域标签
+
+    # 连通区域标记的标签
+    current_label = 1
+
+    for y in range(h):
+        for x in range(w):
+            if disparity_map[y, x] != 0 and labeled_map[y, x] == 0:
+                # 开始一个新的连通区域的标记
+                stack = [(y, x)]
+                labeled_map[y, x] = current_label
+                area = 1
+
+                while stack:
+                    cy, cx = stack.pop()
+
+                    # 检查像素的四个相邻像素
+                    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        ny, nx = cy + dy, cx + dx
+
+                        if 0 <= ny < h and 0 <= nx < w and disparity_map[ny, nx] != 0 and labeled_map[ny, nx] == 0:
+                            # 检查视差差异是否小于阈值
+                            if abs(disparity_map[ny, nx] - disparity_map[y, x]) <= max_disparity_difference:
+                                labeled_map[ny, nx] = current_label
+                                area += 1
+                                stack.append((ny, nx))
+
+                # 如果连通区域的面积小于阈值，将其设为0
+                if area < min_area_threshold:
+                    disparity_map[labeled_map == current_label] = 0
+
+                current_label += 1
+
+    return disparity_map
+
 def getDepthMapWithQ(disparityMap: np.ndarray, Q: np.ndarray) -> np.ndarray:
     points_3d = cv2.reprojectImageTo3D(disparityMap, Q)
     depthMap = points_3d[:, :, 2]
@@ -223,8 +264,8 @@ def WLS_SGBM(left_image, right_image):#利用WLS滤波器改善视差图质量�
     displ = np.int16(displ)
     dispr = np.int16(dispr)
     filteredImg = wls_filter.filter(displ, left_image, None, dispr)
-    filteredImg = cv2.normalize(src=filteredImg, dst=filteredImg, beta=0, alpha=255, norm_type=cv2.NORM_MINMAX)
-    filteredImg = np.uint8(filteredImg)
+    # filteredImg = cv2.normalize(src=filteredImg, dst=filteredImg, beta=0, alpha=255, norm_type=cv2.NORM_MINMAX)
+    # filteredImg = np.uint8(filteredImg)
     return filteredImg
 
 if __name__ == '__main__':
@@ -271,6 +312,7 @@ if __name__ == '__main__':
     # 计算深度图
     #depthMap = getDepthMapWithQ(disp, Q)
     depthMap = getDepthMapWithConfig(disp, config)
+    depthMap = remove_small_connected_components(depthMap) # 剔除小连通区域
     minDepth = np.min(depthMap)
     maxDepth = np.max(depthMap)
     print(minDepth, maxDepth)
